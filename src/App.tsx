@@ -455,7 +455,15 @@ export default function App() {
                 />
               )}
 
-              {section === 'deployment' && <DeploymentView engine={engine} />}
+              {section === 'deployment' && (
+                <DeploymentView
+                  engine={engine}
+                  onRestartEngine={async () => {
+                    const res = await api.restartEngine();
+                    setEngine(res.engine);
+                  }}
+                />
+              )}
             </>
           )}
         </main>
