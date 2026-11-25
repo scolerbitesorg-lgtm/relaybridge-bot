@@ -198,5 +198,10 @@ export const api = {
       method: 'DELETE',
     }),
 
+  restartEngine: () =>
+    request<{ engine: import('./types').EngineStatus }>('/api/engine/restart', {
+      method: 'POST',
+    }),
+
   getExportBundle: () => request<ExportBundle>('/api/export'),
 };
