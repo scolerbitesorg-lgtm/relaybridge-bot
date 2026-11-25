@@ -271,7 +271,29 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await q.edit_message_text(f"Saved {title} as {role.upper()}!")
 
 
+def start_health_server() -> None:
+    """Runs a tiny HTTP /health server so Render Free / Hugging Face Spaces stay awake with UptimeRobot."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    port = int(os.getenv("PORT", "7860"))
+
+    class HealthHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"ok":true,"status":"alive"}')
+
+        def log_message(self, format, *args):
+            return
+
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+
 async def main() -> None:
+    start_health_server()
     await USERBOT.start()
     for ch in STATE.get("channels", []):
         if ch.get("role") == "source" and ch.get("username"):
@@ -285,6 +307,7 @@ async def main() -> None:
         BotCommand("start", "Open control menu"),
         BotCommand("connections", "Manage connections"),
         BotCommand("sources", "Manage sources"),
+        BotCommand("targets", "Manage targets"),
         BotCommand("status", "Live engine status"),
     ])
     app.add_handler(CommandHandler("start", cmd_start))
@@ -306,7 +329,10 @@ if __name__ == "__main__":
 ## Quick Start
 1. Create a Telegram Bot via \`@BotFather\` to get \`TELEGRAM_BOT_TOKEN\`.
 2. Get \`TELEGRAM_API_ID\` and \`TELEGRAM_API_HASH\` from \`https://my.telegram.org\`.
-3. Generate a StringSession for your Userbot account (used to read open/public channels without admin rights and forward large videos/files up to 2GB/4GB).
+3. Generate a **dedicated** StringSession for your Userbot account (never reuse the exact same StringSession on two servers simultaneously, or Telegram will revoke it with \`406 AUTH_KEY_DUPLICATED\`):
+   \`\`\`bash
+   python -c "from telethon.sync import TelegramClient; from telethon.sessions import StringSession; c=TelegramClient(StringSession(), int(input('API_ID: ')), input('API_HASH: ')); c.start(); print(c.session.save())"
+   \`\`\`
 4. Copy \`.env.example\` to \`.env\` and fill in your credentials.
 5. Place your exported \`config.json\` beside \`bot.py\` and run:
    \`\`\`bash
