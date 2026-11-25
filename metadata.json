@@ -1,0 +1,6 @@
+{
+  "name": "RelayBridge",
+  "description": "Telegram Bot and Userbot auto-forwarding control center with source-to-target pipelines, per-connection media and caption filters, backup failover, and adaptive rate limiting.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
