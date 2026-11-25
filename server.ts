@@ -3,7 +3,6 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import express, { type NextFunction, type Request, type Response } from 'express';
-import { createServer as createViteServer } from 'vite';
 import {
   BOT_MENU_COMMANDS,
   buildStartReply,
@@ -23,7 +22,7 @@ import type {
   MediaType,
 } from './server/types.ts';
 
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 const SESSION_SECRET = crypto.randomBytes(32);
 const activeSessions = new Set<string>();
 
@@ -101,6 +100,21 @@ async function startServer(): Promise<void> {
   const app = express();
   app.use(express.json({ limit: '1mb' }));
 
+  // Public lightweight health check for Cloud Run & 24/7 uptime monitors (never exposes secrets)
+  const healthHandler = (_req: Request, res: Response) => {
+    const status = telegramEngine.getStatus();
+    res.json({
+      ok: true,
+      botApiConfigured: status.botApiConfigured,
+      botApiRunning: status.botApiRunning,
+      userbotConfigured: status.userbotConfigured,
+      userbotRunning: status.userbotRunning,
+      uptimeSeconds: status.uptimeSeconds,
+    });
+  };
+  app.get('/health', healthHandler);
+  app.get('/healthz', healthHandler);
+
   // Auth status & login (only enforced when DASHBOARD_PASSCODE is configured in process.env)
   app.get('/api/auth/status', (_req, res) => {
     res.json({ passcodeProtected: isPasscodeConfigured() });
@@ -126,6 +140,11 @@ async function startServer(): Promise<void> {
       return;
     }
     requireDashboardAuth(req, res, next);
+  });
+
+  app.post('/api/engine/restart', async (_req, res) => {
+    const engine = await telegramEngine.restart();
+    res.json({ engine });
   });
 
   // Bootstrap complete dashboard state
@@ -518,6 +537,7 @@ async function startServer(): Promise<void> {
   const distPath = path.resolve(process.cwd(), 'dist');
 
   if (!isProd) {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
@@ -530,9 +550,17 @@ async function startServer(): Promise<void> {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`[RelayBridge] Server listening on http://0.0.0.0:${PORT}`);
   });
+
+  const shutdown = async () => {
+    rateLimitQueue.stop();
+    await telegramEngine.stop();
+    server.close(() => process.exit(0));
+  };
+  process.once('SIGTERM', () => void shutdown());
+  process.once('SIGINT', () => void shutdown());
 }
 
 void startServer();
