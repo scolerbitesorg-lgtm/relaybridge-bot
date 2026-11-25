@@ -125,6 +125,12 @@ class TelegramEngine {
   private lastError: string | undefined;
   private startedAt = Date.now();
   private reconnectTimer: NodeJS.Timeout | null = null;
+  private userbotReconnectTimer: NodeJS.Timeout | null = null;
+  private watchdogTimer: NodeJS.Timeout | null = null;
+  private botStarting = false;
+  private userbotStarting = false;
+  private userbotAuthInvalid = false;
+  private botAuthInvalid = false;
 
   public getStatus(): EngineStatus {
     const botToken = Boolean(process.env.TELEGRAM_BOT_TOKEN?.trim());
@@ -150,7 +156,82 @@ class TelegramEngine {
 
   public async start(): Promise<void> {
     this.registerQueueExecutor();
+    this.startWatchdog();
     await Promise.allSettled([this.startBotApi(), this.startUserbot()]);
+  }
+
+  public async stop(): Promise<void> {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (this.userbotReconnectTimer) {
+      clearTimeout(this.userbotReconnectTimer);
+      this.userbotReconnectTimer = null;
+    }
+    if (this.watchdogTimer) {
+      clearInterval(this.watchdogTimer);
+      this.watchdogTimer = null;
+    }
+    if (this.bot) {
+      try {
+        await this.bot.stop();
+      } catch {
+        // ignore stop errors
+      }
+      this.bot = null;
+      this.botRunning = false;
+    }
+    if (this.userbot) {
+      try {
+        await this.userbot.disconnect();
+      } catch {
+        // ignore disconnect errors
+      }
+      this.userbot = null;
+      this.userbotRunning = false;
+    }
+  }
+
+  public async restart(): Promise<EngineStatus> {
+    await this.stop();
+    this.lastError = undefined;
+    this.userbotAuthInvalid = false;
+    this.botAuthInvalid = false;
+    this.startedAt = Date.now();
+    await this.start();
+    return this.getStatus();
+  }
+
+  private isFatalUserbotError(msg: string): boolean {
+    return /AUTH_KEY_DUPLICATED|AUTH_KEY_UNREGISTERED|SESSION_REVOKED|SESSION_EXPIRED|USER_DEACTIVATED|API_ID_INVALID/i.test(
+      msg,
+    );
+  }
+
+  private startWatchdog(): void {
+    if (this.watchdogTimer) return;
+    this.watchdogTimer = setInterval(() => {
+      const botConfigured = Boolean(process.env.TELEGRAM_BOT_TOKEN?.trim());
+      if (botConfigured && !this.botStarting && !this.botAuthInvalid) {
+        if (!this.bot || !this.botRunning || !this.bot.isRunning()) {
+          this.botRunning = false;
+          void this.startBotApi();
+        }
+      }
+
+      const ubConfigured = Boolean(
+        process.env.TELEGRAM_API_ID?.trim() &&
+          process.env.TELEGRAM_API_HASH?.trim() &&
+          process.env.TELEGRAM_USERBOT_SESSION?.trim(),
+      );
+      if (ubConfigured && !this.userbotStarting && !this.userbotAuthInvalid) {
+        if (!this.userbot || !this.userbotRunning || !this.userbot.connected) {
+          this.userbotRunning = false;
+          void this.startUserbot();
+        }
+      }
+    }, 20_000);
   }
 
   public async syncUserbotSourceJoin(identifier: string): Promise<void> {
@@ -260,11 +341,21 @@ class TelegramEngine {
 
   private async startBotApi(): Promise<void> {
     const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
-    if (!token) {
+    if (!token || this.botStarting) {
       return;
     }
 
+    this.botStarting = true;
     try {
+      if (this.bot) {
+        try {
+          await this.bot.stop();
+        } catch {
+          // ignore prior stop errors
+        }
+        this.bot = null;
+      }
+
       const bot = new Bot(token);
       this.bot = bot;
 
@@ -273,6 +364,9 @@ class TelegramEngine {
         if (allow.size === 0) return true;
         return userId !== undefined && allow.has(String(userId));
       };
+
+      // Clear any previous webhook so long-polling starts cleanly without conflicts
+      await bot.api.deleteWebhook({ drop_pending_updates: false }).catch(() => {});
 
       // Always register Menu Button commands so the Telegram menu always shows every command
       await bot.api.setMyCommands(BOT_MENU_COMMANDS);
@@ -445,17 +539,33 @@ class TelegramEngine {
       });
     } catch (err) {
       this.botRunning = false;
-      this.lastError = err instanceof Error ? err.message : String(err);
+      const errMsg = err instanceof Error ? err.message : String(err);
+      this.lastError = errMsg;
+      if (/401|Unauthorized|Not Found/i.test(errMsg)) {
+        this.botAuthInvalid = true;
+      } else {
+        this.scheduleBotReconnect();
+      }
       console.error('[BotAPI] Failed to start:', this.lastError);
+    } finally {
+      this.botStarting = false;
     }
   }
 
   private scheduleBotReconnect(): void {
-    if (this.reconnectTimer) return;
+    if (this.reconnectTimer || this.botAuthInvalid) return;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       void this.startBotApi();
-    }, 10_000);
+    }, 6_000);
+  }
+
+  private scheduleUserbotReconnect(): void {
+    if (this.userbotReconnectTimer || this.userbotAuthInvalid) return;
+    this.userbotReconnectTimer = setTimeout(() => {
+      this.userbotReconnectTimer = null;
+      void this.startUserbot();
+    }, 8_000);
   }
 
   private async startUserbot(): Promise<void> {
@@ -463,19 +573,32 @@ class TelegramEngine {
     const apiHash = process.env.TELEGRAM_API_HASH?.trim();
     const sessionStr = process.env.TELEGRAM_USERBOT_SESSION?.trim();
 
-    if (!apiIdRaw || !apiHash || !sessionStr) {
+    if (!apiIdRaw || !apiHash || !sessionStr || this.userbotStarting || this.userbotAuthInvalid) {
       return;
     }
 
     const apiId = Number(apiIdRaw);
     if (!Number.isInteger(apiId) || apiId <= 0) {
+      this.userbotAuthInvalid = true;
       this.lastError = 'TELEGRAM_API_ID must be a valid positive integer';
       return;
     }
 
+    this.userbotStarting = true;
+    let client: TelegramClient | null = null;
     try {
-      const client = new TelegramClient(new StringSession(sessionStr), apiId, apiHash, {
-        connectionRetries: 5,
+      if (this.userbot) {
+        try {
+          await this.userbot.disconnect();
+        } catch {
+          // ignore disconnect errors
+        }
+        this.userbot = null;
+      }
+
+      client = new TelegramClient(new StringSession(sessionStr), apiId, apiHash, {
+        connectionRetries: 3,
+        autoReconnect: true,
       });
 
       await client.connect();
@@ -559,8 +682,24 @@ class TelegramEngine {
       console.log(`[Userbot] Live MTProto Userbot (${this.userbotAccount}) connected.`);
     } catch (err) {
       this.userbotRunning = false;
-      this.lastError = err instanceof Error ? err.message : String(err);
-      console.error('[Userbot] Failed to connect:', this.lastError);
+      const rawMsg = err instanceof Error ? err.message : String(err);
+      if (client) {
+        await client.disconnect().catch(() => {});
+      }
+
+      if (this.isFatalUserbotError(rawMsg)) {
+        this.userbotAuthInvalid = true;
+        this.lastError = /AUTH_KEY_DUPLICATED/i.test(rawMsg)
+          ? 'Userbot session revoked by Telegram (406 AUTH_KEY_DUPLICATED — the same StringSession was used from two locations at once). Generate a fresh StringSession, update TELEGRAM_USERBOT_SESSION in Secrets, and click Restart Bot & Userbot. Bot API remains active.'
+          : `Userbot session rejected by Telegram (${rawMsg}). Generate a fresh TELEGRAM_USERBOT_SESSION in Secrets and restart. Bot API remains active.`;
+        console.warn('[Userbot] Session invalidated by Telegram — paused auto-reconnect until TELEGRAM_USERBOT_SESSION is refreshed.');
+      } else {
+        this.lastError = rawMsg;
+        console.error('[Userbot] Transient connection failure, retrying:', rawMsg);
+        this.scheduleUserbotReconnect();
+      }
+    } finally {
+      this.userbotStarting = false;
     }
   }
 }
