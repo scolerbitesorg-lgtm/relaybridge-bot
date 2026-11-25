@@ -1,10 +1,11 @@
 import React, { useEffect, useState } from 'react';
-import { Check, Copy, Download } from 'lucide-react';
+import { Check, Copy, Download, RefreshCw } from 'lucide-react';
 import { api } from '../api';
 import type { EngineStatus, ExportBundle } from '../types';
 
 interface DeploymentViewProps {
   engine: EngineStatus;
+  onRestartEngine: () => Promise<void>;
 }
 
 type FileTab = 'pythonBot' | 'configJson' | 'requirementsTxt' | 'envTemplate' | 'readmeMd';
@@ -17,11 +18,12 @@ const FILE_META: Record<FileTab, { label: string; filename: string }> = {
   readmeMd: { label: 'README.md', filename: 'README.md' },
 };
 
-export const DeploymentView: React.FC<DeploymentViewProps> = ({ engine }) => {
+export const DeploymentView: React.FC<DeploymentViewProps> = ({ engine, onRestartEngine }) => {
   const [bundle, setBundle] = useState<ExportBundle | null>(null);
   const [activeTab, setActiveTab] = useState<FileTab>('pythonBot');
   const [copied, setCopied] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [restarting, setRestarting] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -57,6 +59,15 @@ export const DeploymentView: React.FC<DeploymentViewProps> = ({ engine }) => {
     a.download = FILE_META[tab].filename;
     a.click();
     URL.revokeObjectURL(url);
+  };
+
+  const handleRestart = async () => {
+    setRestarting(true);
+    try {
+      await onRestartEngine();
+    } finally {
+      setRestarting(false);
+    }
   };
 
   const readinessItems = [
@@ -96,13 +107,24 @@ export const DeploymentView: React.FC<DeploymentViewProps> = ({ engine }) => {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight text-slate-900">
-          Live Engine Readiness &amp; Deployment Export
-        </h1>
-        <p className="mt-1 text-sm text-slate-600 max-w-2xl">
-          Run the built-in Node.js Bot + Userbot directly on this server using environment Secrets, or download the standalone Python Telethon + Bot API package synced with all your current connections and filters.
-        </p>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight text-slate-900">
+            Live Engine Readiness &amp; Deployment Export
+          </h1>
+          <p className="mt-1 text-sm text-slate-600 max-w-2xl">
+            Run the built-in Node.js Bot + Userbot directly on this server using environment Secrets, or download the standalone Python Telethon + Bot API package synced with all your current connections and filters.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => void handleRestart()}
+          disabled={restarting}
+          className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-xs font-medium text-slate-900 hover:bg-slate-50 disabled:opacity-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+        >
+          <RefreshCw className={`h-3.5 w-3.5 ${restarting ? 'animate-spin' : ''}`} />
+          {restarting ? 'Restarting...' : 'Restart Bot & Userbot'}
+        </button>
       </div>
 
       {/* Server-Side Secret Readiness Table (No API Key Inputs in UI) */}
@@ -145,6 +167,46 @@ export const DeploymentView: React.FC<DeploymentViewProps> = ({ engine }) => {
             Last runtime notice: {engine.lastError}
           </div>
         )}
+      </div>
+
+      {/* Google Cloud Run 24/7 Always-On Configuration */}
+      <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
+        <div className="border-b border-slate-200 px-5 py-3.5 bg-slate-50/70">
+          <h2 className="text-sm font-semibold text-slate-900">
+            Google Cloud Run — 24/7 Always-On (No Sleep) Settings
+          </h2>
+          <p className="text-xs text-slate-500 mt-0.5">
+            Keep min-instances=1, max-instances=1, and CPU always allocated so Telegram Bot &amp; Userbot stay online 24/7 without ever sleeping or hitting duplicate-session errors.
+          </p>
+        </div>
+        <div className="p-5 space-y-3 text-xs text-slate-700">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <div className="rounded-lg border border-slate-200 bg-slate-50/60 p-3">
+              <div className="font-semibold text-slate-900">1. Min &amp; Max Instances = 1</div>
+              <div className="mt-1 text-slate-600">
+                Prevents scale-to-zero sleep AND prevents 2 containers from colliding on Telegram polling/sessions.
+              </div>
+            </div>
+            <div className="rounded-lg border border-slate-200 bg-slate-50/60 p-3">
+              <div className="font-semibold text-slate-900">2. CPU Always Allocated</div>
+              <div className="mt-1 text-slate-600">
+                Allows background Telegram Bot polling and MTProto Userbot events to run continuously between HTTP requests.
+              </div>
+            </div>
+            <div className="rounded-lg border border-slate-200 bg-slate-50/60 p-3">
+              <div className="font-semibold text-slate-900">3. Health Probe: /health</div>
+              <div className="mt-1 text-slate-600">
+                Built-in lightweight endpoint verifies Bot API &amp; Userbot uptime without exposing secrets.
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-lg bg-slate-950 p-3.5 font-mono text-xs text-slate-200 overflow-x-auto">
+            <code>
+              gcloud run deploy relaybridge-bot --source . --region asia-southeast1 --min-instances=1 --max-instances=1 --no-cpu-throttling --allow-unauthenticated
+            </code>
+          </div>
+        </div>
       </div>
 
       {/* Standalone Bot + Userbot Export Explorer */}
